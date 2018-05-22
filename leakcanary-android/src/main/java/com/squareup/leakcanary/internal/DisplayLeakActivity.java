@@ -15,13 +15,15 @@
  */
 package com.squareup.leakcanary.internal;
 
-import android.annotation.TargetApi;
+import android.annotation.SuppressLint;
+import android.app.ActionBar;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -56,21 +58,26 @@ import java.util.List;
 import java.util.concurrent.Executor;
 
 import static android.app.PendingIntent.FLAG_UPDATE_CURRENT;
+import static android.support.v4.content.FileProvider.getUriForFile;
 import static android.text.format.DateUtils.FORMAT_SHOW_DATE;
 import static android.text.format.DateUtils.FORMAT_SHOW_TIME;
 import static android.text.format.Formatter.formatShortFileSize;
 import static android.view.View.GONE;
 import static android.view.View.VISIBLE;
+import static com.squareup.leakcanary.BuildConfig.GIT_SHA;
+import static com.squareup.leakcanary.BuildConfig.LIBRARY_VERSION;
 import static com.squareup.leakcanary.LeakCanary.leakInfo;
 import static com.squareup.leakcanary.internal.LeakCanaryInternals.newSingleThreadExecutor;
 
-@SuppressWarnings("ConstantConditions") @TargetApi(Build.VERSION_CODES.HONEYCOMB)
+@SuppressWarnings("ConstantConditions")
 public final class DisplayLeakActivity extends Activity {
 
   private static LeakDirectoryProvider leakDirectoryProvider = null;
 
   private static final String SHOW_LEAK_EXTRA = "show_latest";
 
+  // Public API.
+  @SuppressWarnings("unused")
   public static PendingIntent createPendingIntent(Context context) {
     return createPendingIntent(context, null);
   }
@@ -86,13 +93,12 @@ public final class DisplayLeakActivity extends Activity {
     DisplayLeakActivity.leakDirectoryProvider = leakDirectoryProvider;
   }
 
-  static File getLeakDirectory(Context context) {
+  private static LeakDirectoryProvider leakDirectoryProvider(Context context) {
     LeakDirectoryProvider leakDirectoryProvider = DisplayLeakActivity.leakDirectoryProvider;
-    if (leakDirectoryProvider != null) {
-      return leakDirectoryProvider.leakDirectory();
-    } else {
-      return new DefaultLeakDirectoryProvider(context).leakDirectory();
+    if (leakDirectoryProvider == null) {
+      leakDirectoryProvider = new DefaultLeakDirectoryProvider(context);
     }
+    return leakDirectoryProvider;
   }
 
   // null until it's been first loaded.
@@ -103,6 +109,7 @@ public final class DisplayLeakActivity extends Activity {
   private TextView failureView;
   private Button actionButton;
 
+  @SuppressWarnings("unchecked")
   @Override protected void onCreate(Bundle savedInstanceState) {
     super.onCreate(savedInstanceState);
 
@@ -115,19 +122,17 @@ public final class DisplayLeakActivity extends Activity {
       }
     }
 
-    //noinspection unchecked
     leaks = (List<Leak>) getLastNonConfigurationInstance();
 
     setContentView(R.layout.leak_canary_display_leak);
 
-    listView = (ListView) findViewById(R.id.__leak_canary_display_leak_list);
-    failureView = (TextView) findViewById(R.id.__leak_canary_display_leak_failure);
-    actionButton = (Button) findViewById(R.id.__leak_canary_action);
+    listView = findViewById(R.id.leak_canary_display_leak_list);
+    failureView = findViewById(R.id.leak_canary_display_leak_failure);
+    actionButton = findViewById(R.id.leak_canary_action);
 
     updateUi();
   }
 
-  // No, it's not deprecated. Android lies.
   @Override public Object onRetainNonConfigurationInstance() {
     return leaks;
   }
@@ -139,7 +144,7 @@ public final class DisplayLeakActivity extends Activity {
 
   @Override protected void onResume() {
     super.onResume();
-    LoadLeaks.load(this);
+    LoadLeaks.load(this, leakDirectoryProvider(this));
   }
 
   @Override public void setTheme(int resid) {
@@ -207,14 +212,41 @@ public final class DisplayLeakActivity extends Activity {
     startActivity(Intent.createChooser(intent, getString(R.string.leak_canary_share_with)));
   }
 
+  @SuppressLint("SetWorldReadable")
   void shareHeapDump() {
     Leak visibleLeak = getVisibleLeak();
     File heapDumpFile = visibleLeak.heapDump.heapDumpFile;
+    //noinspection ResultOfMethodCallIgnored
     heapDumpFile.setReadable(true, false);
     Intent intent = new Intent(Intent.ACTION_SEND);
     intent.setType("application/octet-stream");
-    intent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(heapDumpFile));
+    Uri heapDumpUri = getUriForFile(getBaseContext(),
+        "com.squareup.leakcanary.fileprovider." + getApplication().getPackageName(), heapDumpFile);
+    intent.putExtra(Intent.EXTRA_STREAM, heapDumpUri);
     startActivity(Intent.createChooser(intent, getString(R.string.leak_canary_share_with)));
+  }
+
+  void deleteVisibleLeak() {
+    Leak visibleLeak = getVisibleLeak();
+    File heapDumpFile = visibleLeak.heapDump.heapDumpFile;
+    File resultFile = visibleLeak.resultFile;
+    boolean resultDeleted = resultFile.delete();
+    if (!resultDeleted) {
+      CanaryLog.d("Could not delete result file %s", resultFile.getPath());
+    }
+    boolean heapDumpDeleted = heapDumpFile.delete();
+    if (!heapDumpDeleted) {
+      CanaryLog.d("Could not delete heap dump file %s", heapDumpFile.getPath());
+    }
+    visibleLeakRefKey = null;
+    leaks.remove(visibleLeak);
+    updateUi();
+  }
+
+  void deleteAllLeaks() {
+    leakDirectoryProvider(DisplayLeakActivity.this).clearLeakDirectory();
+    leaks = Collections.emptyList();
+    updateUi();
   }
 
   void updateUi() {
@@ -241,14 +273,23 @@ public final class DisplayLeakActivity extends Activity {
       if (result.failure != null) {
         listView.setVisibility(GONE);
         failureView.setVisibility(VISIBLE);
-        failureView.setText(
-            getString(R.string.leak_canary_failure_report) + Log.getStackTraceString(
-                result.failure));
+        String failureMessage = getString(R.string.leak_canary_failure_report)
+            + LIBRARY_VERSION
+            + " "
+            + GIT_SHA
+            + "\n"
+            + Log.getStackTraceString(result.failure);
+        failureView.setText(failureMessage);
         setTitle(R.string.leak_canary_analysis_failed);
         invalidateOptionsMenu();
-        getActionBar().setDisplayHomeAsUpEnabled(true);
+        setDisplayHomeAsUpEnabled(true);
         actionButton.setVisibility(VISIBLE);
         actionButton.setText(R.string.leak_canary_delete);
+        actionButton.setOnClickListener(new View.OnClickListener() {
+          @Override public void onClick(View v) {
+            deleteVisibleLeak();
+          }
+        });
         listView.setAdapter(null);
       } else {
         final DisplayLeakAdapter adapter;
@@ -264,25 +305,12 @@ public final class DisplayLeakActivity extends Activity {
             }
           });
           invalidateOptionsMenu();
-          getActionBar().setDisplayHomeAsUpEnabled(true);
+          setDisplayHomeAsUpEnabled(true);
           actionButton.setVisibility(VISIBLE);
           actionButton.setText(R.string.leak_canary_delete);
           actionButton.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-              Leak visibleLeak = getVisibleLeak();
-              File heapDumpFile = visibleLeak.heapDump.heapDumpFile;
-              File resultFile = visibleLeak.resultFile;
-              boolean resultDeleted = resultFile.delete();
-              if (!resultDeleted) {
-                CanaryLog.d("Could not delete result file %s", resultFile.getPath());
-              }
-              boolean heapDumpDeleted = heapDumpFile.delete();
-              if (!heapDumpDeleted) {
-                CanaryLog.d("Could not delete heap dump file %s", heapDumpFile.getPath());
-              }
-              visibleLeakRefKey = null;
-              leaks.remove(visibleLeak);
-              updateUi();
+              deleteVisibleLeak();
             }
           });
         }
@@ -307,27 +335,35 @@ public final class DisplayLeakActivity extends Activity {
         });
         invalidateOptionsMenu();
         setTitle(getString(R.string.leak_canary_leak_list_title, getPackageName()));
-        getActionBar().setDisplayHomeAsUpEnabled(false);
+        setDisplayHomeAsUpEnabled(false);
         actionButton.setText(R.string.leak_canary_delete_all);
         actionButton.setOnClickListener(new View.OnClickListener() {
           @Override public void onClick(View v) {
-            File leakDirectory = getLeakDirectory(DisplayLeakActivity.this);
-            File[] files = leakDirectory.listFiles();
-            if (files != null) {
-              for (File file : files) {
-                boolean deleted = file.delete();
-                if (!deleted) {
-                  CanaryLog.d("Could not delete file %s", file.getPath());
-                }
-              }
-            }
-            leaks = Collections.emptyList();
-            updateUi();
+            new AlertDialog.Builder(DisplayLeakActivity.this).setIcon(
+                android.R.drawable.ic_dialog_alert)
+                .setTitle(R.string.leak_canary_delete_all)
+                .setMessage(R.string.leak_canary_delete_all_leaks_title)
+                .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                  @Override public void onClick(DialogInterface dialog, int which) {
+                    deleteAllLeaks();
+                  }
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
           }
         });
       }
       actionButton.setVisibility(leaks.size() == 0 ? GONE : VISIBLE);
     }
+  }
+
+  private void setDisplayHomeAsUpEnabled(boolean enabled) {
+    ActionBar actionBar = getActionBar();
+    if (actionBar == null) {
+      // https://github.com/square/leakcanary/issues/967
+      return;
+    }
+    actionBar.setDisplayHomeAsUpEnabled(enabled);
   }
 
   Leak getVisibleLeak() {
@@ -361,8 +397,8 @@ public final class DisplayLeakActivity extends Activity {
         convertView = LayoutInflater.from(DisplayLeakActivity.this)
             .inflate(R.layout.leak_canary_leak_row, parent, false);
       }
-      TextView titleView = (TextView) convertView.findViewById(R.id.__leak_canary_row_text);
-      TextView timeView = (TextView) convertView.findViewById(R.id.__leak_canary_row_time);
+      TextView titleView = convertView.findViewById(R.id.leak_canary_row_text);
+      TextView timeView = convertView.findViewById(R.id.leak_canary_row_time);
       Leak leak = getItem(position);
 
       String index = (leaks.size() - position) + ". ";
@@ -409,8 +445,8 @@ public final class DisplayLeakActivity extends Activity {
 
     static final Executor backgroundExecutor = newSingleThreadExecutor("LoadLeaks");
 
-    static void load(DisplayLeakActivity activity) {
-      LoadLeaks loadLeaks = new LoadLeaks(activity);
+    static void load(DisplayLeakActivity activity, LeakDirectoryProvider leakDirectoryProvider) {
+      LoadLeaks loadLeaks = new LoadLeaks(activity, leakDirectoryProvider);
       inFlight.add(loadLeaks);
       backgroundExecutor.execute(loadLeaks);
     }
@@ -423,58 +459,55 @@ public final class DisplayLeakActivity extends Activity {
     }
 
     DisplayLeakActivity activityOrNull;
-    private final File leakDirectory;
+    private final LeakDirectoryProvider leakDirectoryProvider;
     private final Handler mainHandler;
 
-    LoadLeaks(DisplayLeakActivity activity) {
+    LoadLeaks(DisplayLeakActivity activity, LeakDirectoryProvider leakDirectoryProvider) {
       this.activityOrNull = activity;
-      leakDirectory = getLeakDirectory(activity);
+      this.leakDirectoryProvider = leakDirectoryProvider;
       mainHandler = new Handler(Looper.getMainLooper());
     }
 
     @Override public void run() {
       final List<Leak> leaks = new ArrayList<>();
-      File[] files = leakDirectory.listFiles(new FilenameFilter() {
+      List<File> files = leakDirectoryProvider.listFiles(new FilenameFilter() {
         @Override public boolean accept(File dir, String filename) {
           return filename.endsWith(".result");
         }
       });
-
-      if (files != null) {
-        for (File resultFile : files) {
-          FileInputStream fis = null;
-          try {
-            fis = new FileInputStream(resultFile);
-            ObjectInputStream ois = new ObjectInputStream(fis);
-            HeapDump heapDump = (HeapDump) ois.readObject();
-            AnalysisResult result = (AnalysisResult) ois.readObject();
-            leaks.add(new Leak(heapDump, result, resultFile));
-          } catch (IOException | ClassNotFoundException e) {
-            // Likely a change in the serializable result class.
-            // Let's remove the files, we can't read them anymore.
-            boolean deleted = resultFile.delete();
-            if (deleted) {
-              CanaryLog.d(e, "Could not read result file %s, deleted it.", resultFile);
-            } else {
-              CanaryLog.d(e, "Could not read result file %s, could not delete it either.",
-                  resultFile);
-            }
-          } finally {
-            if (fis != null) {
-              try {
-                fis.close();
-              } catch (IOException ignored) {
-              }
+      for (File resultFile : files) {
+        FileInputStream fis = null;
+        try {
+          fis = new FileInputStream(resultFile);
+          ObjectInputStream ois = new ObjectInputStream(fis);
+          HeapDump heapDump = (HeapDump) ois.readObject();
+          AnalysisResult result = (AnalysisResult) ois.readObject();
+          leaks.add(new Leak(heapDump, result, resultFile));
+        } catch (IOException | ClassNotFoundException e) {
+          // Likely a change in the serializable result class.
+          // Let's remove the files, we can't read them anymore.
+          boolean deleted = resultFile.delete();
+          if (deleted) {
+            CanaryLog.d(e, "Could not read result file %s, deleted it.", resultFile);
+          } else {
+            CanaryLog.d(e, "Could not read result file %s, could not delete it either.",
+                resultFile);
+          }
+        } finally {
+          if (fis != null) {
+            try {
+              fis.close();
+            } catch (IOException ignored) {
             }
           }
         }
-        Collections.sort(leaks, new Comparator<Leak>() {
-          @Override public int compare(Leak lhs, Leak rhs) {
-            return Long.valueOf(rhs.resultFile.lastModified())
-                .compareTo(lhs.resultFile.lastModified());
-          }
-        });
       }
+      Collections.sort(leaks, new Comparator<Leak>() {
+        @Override public int compare(Leak lhs, Leak rhs) {
+          return Long.valueOf(rhs.resultFile.lastModified())
+              .compareTo(lhs.resultFile.lastModified());
+        }
+      });
       mainHandler.post(new Runnable() {
         @Override public void run() {
           inFlight.remove(LoadLeaks.this);

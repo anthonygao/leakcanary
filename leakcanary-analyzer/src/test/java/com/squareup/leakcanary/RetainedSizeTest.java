@@ -8,11 +8,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
-import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK;
-import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK_MPREVIEW2;
-import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK_M_POSTPREVIEW2;
-import static com.squareup.leakcanary.TestUtil.HeapDumpFile.SERVICE_BINDER;
-import static com.squareup.leakcanary.TestUtil.HeapDumpFile.SERVICE_BINDER_IGNORED;
+import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK_M;
+import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK_O;
+import static com.squareup.leakcanary.TestUtil.HeapDumpFile.ASYNC_TASK_PRE_M;
 import static com.squareup.leakcanary.TestUtil.analyze;
 import static org.junit.Assert.assertEquals;
 
@@ -24,17 +22,15 @@ public class RetainedSizeTest {
 
   @Parameterized.Parameters public static Collection<Object[]> data() {
     return Arrays.asList(new Object[][] {
-        { ASYNC_TASK, 207_407 }, //
-        { ASYNC_TASK_MPREVIEW2, 1_604 }, //
-        { ASYNC_TASK_M_POSTPREVIEW2, 1_870 }, //
-        { SERVICE_BINDER, 378 }, //
-        { SERVICE_BINDER_IGNORED, 378 }, //
+        { ASYNC_TASK_PRE_M, 207_407 }, //
+        { ASYNC_TASK_M, 1_870 }, //
+        { ASYNC_TASK_O, 753 }, //
     });
   }
 
   private final TestUtil.HeapDumpFile heapDumpFile;
   private final long expectedRetainedHeapSize;
-  ExcludedRefs.Builder excludedRefs;
+  ExcludedRefs.BuilderWithParams excludedRefs;
 
   public RetainedSizeTest(TestUtil.HeapDumpFile heapDumpFile, long expectedRetainedHeapSize) {
     this.heapDumpFile = heapDumpFile;
@@ -42,8 +38,10 @@ public class RetainedSizeTest {
   }
 
   @Before public void setUp() {
-    excludedRefs = new ExcludedRefs.Builder().clazz(WeakReference.class.getName(), true)
-        .clazz("java.lang.ref.FinalizerReference", true);
+    excludedRefs = new ExcludedRefs.BuilderWithParams().clazz(WeakReference.class.getName())
+        .alwaysExclude()
+        .clazz("java.lang.ref.FinalizerReference")
+        .alwaysExclude();
   }
 
   @Test public void leakFound() {

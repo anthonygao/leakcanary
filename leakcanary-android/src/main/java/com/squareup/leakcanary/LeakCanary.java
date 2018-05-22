@@ -19,13 +19,15 @@ import android.app.Application;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.res.Resources;
 import android.os.Build;
 import android.util.Log;
 import com.squareup.leakcanary.internal.DisplayLeakActivity;
 import com.squareup.leakcanary.internal.HeapAnalyzerService;
+import com.squareup.leakcanary.internal.LeakCanaryInternals;
 
 import static android.text.format.Formatter.formatShortFileSize;
+import static com.squareup.leakcanary.BuildConfig.GIT_SHA;
+import static com.squareup.leakcanary.BuildConfig.LIBRARY_VERSION;
 import static com.squareup.leakcanary.internal.LeakCanaryInternals.isInServiceProcess;
 import static com.squareup.leakcanary.internal.LeakCanaryInternals.setEnabled;
 
@@ -36,48 +38,35 @@ public final class LeakCanary {
    * references (on ICS+).
    */
   public static RefWatcher install(Application application) {
-    return install(application, DisplayLeakService.class,
-        AndroidExcludedRefs.createAppDefaults().build());
+    return refWatcher(application).listenerServiceClass(DisplayLeakService.class)
+        .excludedRefs(AndroidExcludedRefs.createAppDefaults().build())
+        .buildAndInstall();
   }
 
   /**
-   * Creates a {@link RefWatcher} that reports results to the provided service, and starts watching
-   * activity references (on ICS+).
+   * @return the {@link RefWatcher} installed via {@link AndroidRefWatcherBuilder#buildAndInstall()}.
    */
-  public static RefWatcher install(Application application,
-      Class<? extends AbstractAnalysisResultService> listenerServiceClass,
-      ExcludedRefs excludedRefs) {
-    if (isInAnalyzerProcess(application)) {
-      return RefWatcher.DISABLED;
+  public static RefWatcher installedRefWatcher() {
+    RefWatcher refWatcher = LeakCanaryInternals.installedRefWatcher;
+    if (refWatcher == null) {
+      throw new IllegalStateException("AndroidRefWatcherBuilder.buildAndInstall() was not called");
     }
-    enableDisplayLeakActivity(application);
-    HeapDump.Listener heapDumpListener =
-        new ServiceHeapDumpListener(application, listenerServiceClass);
-    RefWatcher refWatcher = androidWatcher(application, heapDumpListener, excludedRefs);
-    ActivityRefWatcher.installOnIcsPlus(application, refWatcher);
     return refWatcher;
   }
 
-  /**
-   * Creates a {@link RefWatcher} with a default configuration suitable for Android.
-   */
-  public static RefWatcher androidWatcher(Context context, HeapDump.Listener heapDumpListener,
-      ExcludedRefs excludedRefs) {
-    LeakDirectoryProvider leakDirectoryProvider = new DefaultLeakDirectoryProvider(context);
-    DebuggerControl debuggerControl = new AndroidDebuggerControl();
-    AndroidHeapDumper heapDumper = new AndroidHeapDumper(context, leakDirectoryProvider);
-    heapDumper.cleanup();
-    Resources resources = context.getResources();
-    int watchDelayMillis = resources.getInteger(R.integer.leak_canary_watch_delay_millis);
-    AndroidWatchExecutor executor = new AndroidWatchExecutor(watchDelayMillis);
-    return new RefWatcher(executor, debuggerControl, GcTrigger.DEFAULT, heapDumper,
-        heapDumpListener, excludedRefs);
+  public static AndroidRefWatcherBuilder refWatcher(Context context) {
+    return new AndroidRefWatcherBuilder(context);
   }
 
   public static void enableDisplayLeakActivity(Context context) {
     setEnabled(context, DisplayLeakActivity.class, true);
   }
 
+  /**
+   * If you build a {@link RefWatcher} with a {@link AndroidHeapDumper} that has a custom {@link
+   * LeakDirectoryProvider}, then you should also call this method to make sure the activity in
+   * charge of displaying leaks can find those on the file system.
+   */
   public static void setDisplayLeakActivityDirectoryProvider(
       LeakDirectoryProvider leakDirectoryProvider) {
     DisplayLeakActivity.setLeakDirectoryProvider(leakDirectoryProvider);
@@ -100,7 +89,7 @@ public final class LeakCanary {
     String detailedString = "";
     if (result.leakFound) {
       if (result.excludedLeak) {
-        info += "* LEAK CAN BE IGNORED.\n";
+        info += "* EXCLUDED LEAK.\n";
       }
       info += "* " + result.className;
       if (!heapDump.referenceName.equals("")) {
@@ -112,7 +101,10 @@ public final class LeakCanary {
         detailedString = "\n* Details:\n" + result.leakTrace.toDetailedString();
       }
     } else if (result.failure != null) {
-      info += "* FAILURE:\n" + Log.getStackTraceString(result.failure) + "\n";
+      // We duplicate the library version & Sha information because bug reports often only contain
+      // the stacktrace.
+      info += "* FAILURE in " + LIBRARY_VERSION + " " + GIT_SHA + ":" + Log.getStackTraceString(
+          result.failure) + "\n";
     } else {
       info += "* NO LEAK FOUND.\n\n";
     }
@@ -137,9 +129,9 @@ public final class LeakCanary {
         + " API: "
         + Build.VERSION.SDK_INT
         + " LeakCanary: "
-        + BuildConfig.LIBRARY_VERSION
+        + LIBRARY_VERSION
         + " "
-        + BuildConfig.GIT_SHA
+        + GIT_SHA
         + "\n"
         + "* Durations: watch="
         + heapDump.watchDurationMs
@@ -161,7 +153,13 @@ public final class LeakCanary {
    * a different process than the normal app process.
    */
   public static boolean isInAnalyzerProcess(Context context) {
-    return isInServiceProcess(context, HeapAnalyzerService.class);
+    Boolean isInAnalyzerProcess = LeakCanaryInternals.isInAnalyzerProcess;
+    // This only needs to be computed once per process.
+    if (isInAnalyzerProcess == null) {
+      isInAnalyzerProcess = isInServiceProcess(context, HeapAnalyzerService.class);
+      LeakCanaryInternals.isInAnalyzerProcess = isInAnalyzerProcess;
+    }
+    return isInAnalyzerProcess;
   }
 
   private LeakCanary() {

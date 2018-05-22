@@ -18,6 +18,7 @@ package com.squareup.leakcanary.internal;
 import android.annotation.TargetApi;
 import android.app.ActivityManager;
 import android.app.Notification;
+import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
@@ -28,7 +29,8 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import com.squareup.leakcanary.CanaryLog;
 import com.squareup.leakcanary.R;
-import java.lang.reflect.Method;
+import com.squareup.leakcanary.RefWatcher;
+import java.util.List;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
@@ -37,19 +39,26 @@ import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
 import static android.content.pm.PackageManager.DONT_KILL_APP;
 import static android.content.pm.PackageManager.GET_SERVICES;
 import static android.os.Build.VERSION.SDK_INT;
-import static android.os.Build.VERSION_CODES.HONEYCOMB;
 import static android.os.Build.VERSION_CODES.JELLY_BEAN;
+import static android.os.Build.VERSION_CODES.O;
 
 public final class LeakCanaryInternals {
 
-  // SDK INT for API 22.
-  public static final int LOLLIPOP_MR1 = 22;
   public static final String SAMSUNG = "samsung";
   public static final String MOTOROLA = "motorola";
+  public static final String LENOVO = "LENOVO";
   public static final String LG = "LGE";
   public static final String NVIDIA = "NVIDIA";
+  public static final String MEIZU = "Meizu";
+  public static final String HUAWEI = "HUAWEI";
+  public static final String VIVO = "vivo";
 
   private static final Executor fileIoExecutor = newSingleThreadExecutor("File-IO");
+  public static volatile RefWatcher installedRefWatcher;
+
+  private static final String NOTIFICATION_CHANNEL_ID = "leakcanary";
+
+  public static volatile Boolean isInAnalyzerProcess;
 
   public static void executeOnFileIoThread(Runnable runnable) {
     fileIoExecutor.execute(runnable);
@@ -114,10 +123,20 @@ public final class LeakCanaryInternals {
     ActivityManager activityManager =
         (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
     ActivityManager.RunningAppProcessInfo myProcess = null;
-    for (ActivityManager.RunningAppProcessInfo process : activityManager.getRunningAppProcesses()) {
-      if (process.pid == myPid) {
-        myProcess = process;
-        break;
+    List<ActivityManager.RunningAppProcessInfo> runningProcesses;
+    try {
+      runningProcesses = activityManager.getRunningAppProcesses();
+    } catch (SecurityException exception) {
+      // https://github.com/square/leakcanary/issues/948
+      CanaryLog.d("Could not get running app processes %d", exception);
+      return false;
+    }
+    if (runningProcesses != null) {
+      for (ActivityManager.RunningAppProcessInfo process : runningProcesses) {
+        if (process.pid == myPid) {
+          myProcess = process;
+          break;
+        }
       }
     }
     if (myProcess == null) {
@@ -128,41 +147,41 @@ public final class LeakCanaryInternals {
     return myProcess.processName.equals(serviceInfo.processName);
   }
 
-  @TargetApi(HONEYCOMB)
   public static void showNotification(Context context, CharSequence contentTitle,
-      CharSequence contentText, PendingIntent pendingIntent) {
+      CharSequence contentText, PendingIntent pendingIntent, int notificationId) {
     NotificationManager notificationManager =
         (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
     Notification notification;
-    if (SDK_INT < HONEYCOMB) {
-      notification = new Notification();
-      notification.icon = R.drawable.leak_canary_notification;
-      notification.when = System.currentTimeMillis();
-      notification.flags |= Notification.FLAG_AUTO_CANCEL;
-      try {
-        Method method =
-            Notification.class.getMethod("setLatestEventInfo", Context.class, CharSequence.class,
-                CharSequence.class, PendingIntent.class);
-        method.invoke(notification, context, contentTitle, contentText, pendingIntent);
-      } catch (Exception e) {
-        throw new RuntimeException(e);
-      }
-    } else {
-      Notification.Builder builder = new Notification.Builder(context) //
-          .setSmallIcon(R.drawable.leak_canary_notification)
-          .setWhen(System.currentTimeMillis())
-          .setContentTitle(contentTitle)
-          .setContentText(contentText)
-          .setAutoCancel(true)
-          .setContentIntent(pendingIntent);
-      if (SDK_INT < JELLY_BEAN) {
-        notification = builder.getNotification();
-      } else {
-        notification = builder.build();
-      }
+    Notification.Builder builder = new Notification.Builder(context) //
+        .setSmallIcon(R.drawable.leak_canary_notification)
+        .setWhen(System.currentTimeMillis())
+        .setContentTitle(contentTitle)
+        .setContentText(contentText)
+        .setAutoCancel(true)
+        .setContentIntent(pendingIntent);
+    if (SDK_INT >= O) {
+      String channelName = context.getString(R.string.leak_canary_notification_channel);
+      setupNotificationChannel(channelName, notificationManager, builder);
     }
-    notificationManager.notify(0xDEAFBEEF, notification);
+    if (SDK_INT < JELLY_BEAN) {
+      notification = builder.getNotification();
+    } else {
+      notification = builder.build();
+    }
+    notificationManager.notify(notificationId, notification);
+  }
+
+  @TargetApi(O)
+  private static void setupNotificationChannel(String channelName,
+      NotificationManager notificationManager, Notification.Builder builder) {
+    if (notificationManager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) == null) {
+      NotificationChannel notificationChannel =
+          new NotificationChannel(NOTIFICATION_CHANNEL_ID, channelName,
+              NotificationManager.IMPORTANCE_DEFAULT);
+      notificationManager.createNotificationChannel(notificationChannel);
+    }
+    builder.setChannelId(NOTIFICATION_CHANNEL_ID);
   }
 
   public static Executor newSingleThreadExecutor(String threadName) {
