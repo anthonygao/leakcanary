@@ -38,7 +38,10 @@ public final class LeakTraceElement implements Serializable {
     OBJECT, CLASS, THREAD, ARRAY
   }
 
-  /** Null if this is the last element in the leak trace, ie the leaking object. */
+  /**
+   * Information about the reference that points to the next {@link LeakTraceElement} in the leak
+   * chain. Null if this is the last element in the leak trace, ie the leaking object.
+   */
   public final LeakReference reference;
 
   /**
@@ -98,7 +101,53 @@ public final class LeakTraceElement implements Serializable {
     fields = Collections.unmodifiableList(stringFields);
   }
 
+  /**
+   * Returns the string value of the first field reference that has the provided referenceName, or
+   * null if no field reference with that name was found.
+   */
+  public String getFieldReferenceValue(String referenceName) {
+    for (LeakReference fieldReference : fieldReferences) {
+      if (fieldReference.name.equals(referenceName)) {
+        return fieldReference.value;
+      }
+    }
+    return null;
+  }
+
+  /** @see #isInstanceOf(String) */
+  public boolean isInstanceOf(Class<?> expectedClass) {
+    return isInstanceOf(expectedClass.getName());
+  }
+
+  /**
+   * Returns true if this element is an instance of the provided class name, false otherwise.
+   */
+  public boolean isInstanceOf(String expectedClassName) {
+    for (String className : classHierarchy) {
+      if (className.equals(expectedClassName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns {@link #className} without the package.
+   */
+  public String getSimpleClassName() {
+    int separator = className.lastIndexOf('.');
+    if (separator == -1) {
+      return className;
+    } else {
+      return className.substring(separator + 1);
+    }
+  }
+
   @Override public String toString() {
+    return toString(false);
+  }
+
+  public String toString(boolean maybeLeakCause) {
     String string = "";
 
     if (reference != null && reference.type == STATIC_FIELD) {
@@ -109,12 +158,14 @@ public final class LeakTraceElement implements Serializable {
       string += holder.name().toLowerCase(US) + " ";
     }
 
-    string += classHierarchy.get(0);
+    string += getSimpleClassName();
 
     if (reference != null) {
-      string += "." + reference.getDisplayName();
-    } else {
-      string += " instance";
+      String referenceName = reference.getDisplayName();
+      if (maybeLeakCause) {
+        referenceName = "!(" + referenceName + ")!";
+      }
+      string += "." + referenceName;
     }
 
     if (extra != null) {
